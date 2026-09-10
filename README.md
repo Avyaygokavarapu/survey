@@ -1,36 +1,91 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# How Families Manage Each Other's Health — survey
 
-## Getting Started
+Branching survey + password-gated admin dashboard with CSV export.
+Next.js 16 (App Router) · Neon Postgres · deployed on Vercel.
 
-First, run the development server:
+## The instrument
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+Everything is generated from **one file**: `src/lib/questions.ts`.
+The public form, server-side validation, the admin table columns and the CSV
+headers all read from it.
+
+```
+Q1 routing ─┬─ Young adult / adult child (18–30) ──→ Branch A (10 Qs)
+            ├─ Caregiver for another family member ─→ Branch A
+            ├─ Parent (roughly 40–65) ─────────────→ Branch B (10 Qs)
+            ├─ Older adult / grandparent (65+) ────→ Branch C (8 Qs)
+            └─ Other ──────────────────────────────→ (no branch)
+                                                        │
+                          all paths converge ──→ 4 common questions
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The common tail is identical for everyone, so those four are comparable across
+generations — including the advice-vs-scorekeeping question.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Question types: `short`, `long`, `single`, `multi`, `scale`.
+Only the routing question is required; everything else is optional, so a
+respondent can skip anything and still complete.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+> Keep every `id` stable once responses exist — it is the JSON key the answer is
+> stored under. Editing a `label` is always safe.
 
-## Learn More
+### Changing the survey
 
-To learn more about Next.js, take a look at the following resources:
+- **Reword a question** — edit its `label`. Nothing else to do.
+- **Add a question** — add it to the relevant branch array. No migration.
+- **Re-route a role** — edit `BRANCH_BY_ROLE`. A routing option with no entry
+  throws at startup rather than silently mis-routing anyone.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Routes
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| Route | |
+| --- | --- |
+| `/` | The public survey — **this is the link you share** |
+| `/api/submit` | POST, validates against the respondent's branch and stores one row |
+| `/admin` | Password-gated dashboard, filterable by branch |
+| `/admin/export` | Full-width CSV of every branch (same password gate) |
 
-## Deploy on Vercel
+## Setup
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+vercel login
+vercel link
+vercel integration add neon --yes        # provisions DATABASE_URL
+vercel env add ADMIN_PASSWORD            # gates /admin
+vercel env pull .env.local --yes         # pull both down for local dev
+npm run dev
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Deploy: `vercel --prod`
+
+## Data model
+
+One row per response. Answers in a single JSONB column, so changing the
+questions never needs a migration. Table is created automatically on first write.
+
+```sql
+create table responses (
+  id         uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  branch     text,            -- 'A' | 'B' | 'C' | null
+  answers    jsonb not null
+);
+```
+
+**A key that is absent from `answers` means the respondent was never asked it**
+(they were on another branch). A key present with a `null` value means they were
+asked and skipped it. That distinction is what makes your denominators honest —
+"24 of 31 Branch A respondents" rather than "24 of 40 people, some of whom were
+never shown the question." The admin table renders the two differently: a blank
+cell for not-asked, an em dash for asked-and-skipped.
+
+## Notes
+
+- Responses are anonymous — no IP address, no user-agent. Nothing identifying is
+  stored unless a question explicitly asks for it.
+- Submissions are validated against the respondent's own branch; answers for any
+  other branch are discarded server-side.
+- CSV export escapes leading `=`, `+`, `-` and `@` so free-text answers cannot
+  execute as formulas when the file is opened in Excel or Sheets.
+- `/admin` is `noindex` and disallowed in `robots.txt`. The admin cookie stores
+  an HMAC, never the password.
