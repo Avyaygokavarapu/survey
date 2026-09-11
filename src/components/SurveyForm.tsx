@@ -1,16 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import {
-  BRANCHES,
-  COMMON,
-  ROLE_ID,
-  ROUTING,
-  SURVEY_INTRO,
-  SURVEY_TITLE,
-  branchFor,
-  type Question,
-} from "@/lib/questions";
+import { branchFor, type Question, type Survey } from "@/lib/surveys";
 
 type Value = string | string[] | number | null;
 
@@ -18,27 +9,33 @@ function blank(q: Question): Value {
   return q.type === "multi" ? [] : q.type === "scale" ? null : "";
 }
 
-export default function SurveyForm() {
-  const [values, setValues] = useState<Record<string, Value>>({ [ROLE_ID]: "" });
+export default function SurveyForm({ survey }: { survey: Survey }) {
+  // A flat survey (no routing question) is simply one step of everything.
+  const routingId = survey.routing?.question.id ?? null;
+  const [values, setValues] = useState<Record<string, Value>>(routingId ? { [routingId]: "" } : {});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [step, setStep] = useState(0);
   const [status, setStatus] = useState<"idle" | "sending" | "done" | "error">("idle");
   const [message, setMessage] = useState("");
 
-  const role = (values[ROLE_ID] as string) || "";
-  const branch = branchFor(role);
-  const branchQuestions = useMemo(() => (branch ? BRANCHES[branch].questions : []), [branch]);
+  const role = routingId ? (values[routingId] as string) || "" : "";
+  const branch = branchFor(survey, role);
+  const branchQuestions = useMemo(
+    () => (branch && survey.routing ? survey.routing.branches[branch].questions : []),
+    [branch, survey],
+  );
 
   // Steps: 0 = routing, 1 = branch (only if there is one), 2 = common tail.
-  const steps = useMemo(
-    () =>
-      [
-        { key: "role", title: "About you", questions: [ROUTING] },
-        ...(branch ? [{ key: "branch", title: BRANCHES[branch].title, questions: branchQuestions }] : []),
-        { key: "common", title: "A few questions for everyone", questions: COMMON },
-      ] as const,
-    [branch, branchQuestions],
-  );
+  const steps = useMemo(() => {
+    if (!survey.routing) {
+      return [{ key: "all", title: survey.tailTitle ?? "Questions", questions: survey.questions }];
+    }
+    return [
+      { key: "role", title: "About you", questions: [survey.routing.question] },
+      ...(branch ? [{ key: "branch", title: survey.routing.branches[branch].title, questions: branchQuestions }] : []),
+      { key: "common", title: survey.tailTitle ?? "A few questions for everyone", questions: survey.questions },
+    ];
+  }, [survey, branch, branchQuestions]);
 
   const current = steps[Math.min(step, steps.length - 1)];
   const isLast = step >= steps.length - 1;
@@ -48,9 +45,9 @@ export default function SurveyForm() {
       const next = { ...prev, [id]: v };
       // Changing the role sends the respondent down a different branch — drop
       // answers from the branch they are leaving so they are never submitted.
-      if (id === ROLE_ID && prev[ROLE_ID] !== v) {
-        const leaving = branchFor(prev[ROLE_ID] as string);
-        if (leaving) for (const q of BRANCHES[leaving].questions) delete next[q.id];
+      if (routingId && id === routingId && prev[routingId] !== v) {
+        const leaving = branchFor(survey, prev[routingId] as string);
+        if (leaving && survey.routing) for (const q of survey.routing.branches[leaving].questions) delete next[q.id];
       }
       return next;
     });
@@ -93,11 +90,12 @@ export default function SurveyForm() {
     setMessage("");
 
     // Send only what this respondent was actually asked.
-    const payload: Record<string, Value> = { [ROLE_ID]: role };
-    for (const q of [...branchQuestions, ...COMMON]) payload[q.id] = values[q.id] ?? blank(q);
+    const payload: Record<string, Value> = {};
+    if (routingId) payload[routingId] = role;
+    for (const q of [...branchQuestions, ...survey.questions]) payload[q.id] = values[q.id] ?? blank(q);
 
     try {
-      const res = await fetch("/api/submit", {
+      const res = await fetch(`/api/submit/${survey.slug}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
@@ -140,8 +138,8 @@ export default function SurveyForm() {
   return (
     <div className="space-y-8">
       <header className="space-y-3">
-        <h1 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">{SURVEY_TITLE}</h1>
-        <p className="text-sm leading-relaxed text-black/60 dark:text-white/60">{SURVEY_INTRO}</p>
+        <h1 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">{survey.title}</h1>
+        <p className="text-sm leading-relaxed text-black/60 dark:text-white/60">{survey.intro}</p>
       </header>
 
       <div className="space-y-2">

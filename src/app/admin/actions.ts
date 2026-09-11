@@ -7,11 +7,11 @@ export async function login(_prev: string | null, formData: FormData): Promise<s
   const password = String(formData.get("password") ?? "");
   if (!checkPassword(password)) return "Incorrect password.";
   await signIn();
-  revalidatePath("/admin");
+  revalidatePath("/admin", "layout");
   return null;
 }
 
 export async function logout() {
   await signOut();
-  revalidatePath("/admin");
+  revalidatePath("/admin", "layout");
 }

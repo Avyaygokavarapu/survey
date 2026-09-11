@@ -1,12 +1,14 @@
-import SurveyForm from "@/components/SurveyForm";
+import type { Metadata } from "next";
+import SurveyScreen from "@/components/SurveyScreen";
+import { DEFAULT_SURVEY } from "@/lib/surveys";
+
+// `/` stays on the family-health survey: a public link to it is already in
+// circulation. Every survey is also reachable at its own /<slug>.
+export const metadata: Metadata = {
+  title: DEFAULT_SURVEY.title,
+  description: DEFAULT_SURVEY.intro,
+};
 
 export default function Home() {
-  return (
-    <main className="mx-auto min-h-dvh w-full max-w-2xl px-5 py-12 sm:py-20">
-      <SurveyForm />
-      <footer className="mt-16 border-t border-black/10 pt-6 text-xs text-black/40 dark:border-white/10 dark:text-white/40">
-        This survey is about your current behaviour, not medical details. Responses will be used only for research.
-      </footer>
-    </main>
-  );
+  return <SurveyScreen survey={DEFAULT_SURVEY} />;
 }
