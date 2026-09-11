@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { branchFor, type Question, type Survey } from "@/lib/surveys";
+import { branchFor, isVisible, type Question, type Survey } from "@/lib/surveys";
 
 type Value = string | string[] | number | null;
 
@@ -10,9 +10,27 @@ function blank(q: Question): Value {
 }
 
 export default function SurveyForm({ survey }: { survey: Survey }) {
-  // A flat survey (no routing question) is simply one step of everything.
+  // A flat survey (no routing question) is stepped through by section instead.
   const routingId = survey.routing?.question.id ?? null;
+  const screeningId = survey.screening?.question.id ?? null;
   const [values, setValues] = useState<Record<string, Value>>(routingId ? { [routingId]: "" } : {});
+
+  // Randomised once per respondent, to reduce order effects within a section.
+  // Safe in a state initialiser: step 0 is never a shuffled section, so the
+  // order is not part of the server-rendered tree and cannot mismatch.
+  const [shuffled] = useState<Record<string, string[]>>(() => {
+    const out: Record<string, string[]> = {};
+    for (const sec of survey.sections ?? []) {
+      if (!sec.shuffle) continue;
+      const ids = sec.questions.map((q) => q.id);
+      for (let i = ids.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [ids[i], ids[j]] = [ids[j], ids[i]];
+      }
+      out[sec.key] = ids;
+    }
+    return out;
+  });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [step, setStep] = useState(0);
   const [status, setStatus] = useState<"idle" | "sending" | "done" | "error">("idle");
@@ -25,20 +43,40 @@ export default function SurveyForm({ survey }: { survey: Survey }) {
     [branch, survey],
   );
 
-  // Steps: 0 = routing, 1 = branch (only if there is one), 2 = common tail.
+  // Steps: an optional screening gate, then either sections or routing+branch+tail.
   const steps = useMemo(() => {
-    if (!survey.routing) {
-      return [{ key: "all", title: survey.tailTitle ?? "Questions", questions: survey.questions }];
+    type Step = { key: string; title: string; intro?: string; questions: Question[] };
+    const out: Step[] = [];
+    if (survey.screening) {
+      out.push({ key: "screening", title: "Before we start", questions: [survey.screening.question] });
     }
-    return [
-      { key: "role", title: "About you", questions: [survey.routing.question] },
-      ...(branch ? [{ key: "branch", title: survey.routing.branches[branch].title, questions: branchQuestions }] : []),
-      { key: "common", title: survey.tailTitle ?? "A few questions for everyone", questions: survey.questions },
-    ];
+    if (survey.sections) {
+      out.push(...survey.sections.map((sec) => ({ key: sec.key, title: sec.title, intro: sec.intro, questions: sec.questions })));
+    } else if (survey.routing) {
+      out.push({ key: "role", title: "About you", questions: [survey.routing.question] });
+      if (branch) out.push({ key: "branch", title: survey.routing.branches[branch].title, questions: branchQuestions });
+      out.push({ key: "common", title: survey.tailTitle ?? "A few questions for everyone", questions: survey.questions });
+    } else {
+      out.push({ key: "all", title: survey.tailTitle ?? "Questions", questions: survey.questions });
+    }
+    return out;
   }, [survey, branch, branchQuestions]);
 
   const current = steps[Math.min(step, steps.length - 1)];
   const isLast = step >= steps.length - 1;
+
+  // A screened-out respondent sees a message instead of the rest of the survey.
+  const screeningAnswer = screeningId ? ((values[screeningId] as string) || "") : "";
+  const disqualified = !!survey.screening && survey.screening.disqualifyIf.includes(screeningAnswer);
+
+  // Presentation order for this step, then drop follow-ups whose trigger is unmet.
+  const order = shuffled[current.key];
+  const visible = useMemo(() => {
+    const qs = order
+      ? current.questions.slice().sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id))
+      : current.questions;
+    return qs.filter((q) => isVisible(q, values));
+  }, [current, order, values]);
 
   function set(id: string, v: Value) {
     setValues((prev) => {
@@ -64,7 +102,7 @@ export default function SurveyForm({ survey }: { survey: Survey }) {
 
   function next() {
     const missing: Record<string, string> = {};
-    for (const q of current.questions) {
+    for (const q of visible) {
       if (!q.required) continue;
       const v = values[q.id];
       const empty = v === null || v === undefined || v === "" || (Array.isArray(v) && v.length === 0);
@@ -89,10 +127,15 @@ export default function SurveyForm({ survey }: { survey: Survey }) {
     setErrors({});
     setMessage("");
 
-    // Send only what this respondent was actually asked.
+    // Send only what this respondent was actually asked — a hidden follow-up
+    // stays absent, which is how "was not asked" is recorded.
     const payload: Record<string, Value> = {};
+    if (screeningId) payload[screeningId] = screeningAnswer;
     if (routingId) payload[routingId] = role;
-    for (const q of [...branchQuestions, ...survey.questions]) payload[q.id] = values[q.id] ?? blank(q);
+    const asked = survey.routing ? [...branchQuestions, ...survey.questions] : survey.questions;
+    for (const q of asked) {
+      if (isVisible(q, values)) payload[q.id] = values[q.id] ?? blank(q);
+    }
 
     try {
       const res = await fetch(`/api/submit/${survey.slug}`, {
@@ -110,7 +153,7 @@ export default function SurveyForm({ survey }: { survey: Survey }) {
         setErrors(data.errors);
         setStatus("idle");
         const firstId = Object.keys(data.errors)[0];
-        const onThisStep = current.questions.some((q) => q.id === firstId);
+        const onThisStep = visible.some((q) => q.id === firstId);
         if (!onThisStep) setStep(0);
         setTimeout(() => document.getElementById(`q-${firstId}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
         return;
@@ -131,6 +174,23 @@ export default function SurveyForm({ survey }: { survey: Survey }) {
         <p className="mx-auto mt-2 max-w-sm text-sm text-emerald-800/80 dark:text-emerald-200/70">
           Your response has been recorded. It will be used only for research.
         </p>
+      </div>
+    );
+  }
+
+  if (disqualified && survey.screening) {
+    return (
+      <div className="space-y-8">
+        <header className="space-y-3">
+          <h1 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">{survey.title}</h1>
+        </header>
+        <fieldset className="space-y-3">
+          <legend className="text-base leading-snug font-medium text-pretty">{survey.screening.question.label}</legend>
+          <Field q={survey.screening.question} value={values[survey.screening.question.id] ?? ""} set={set} toggle={toggle} />
+        </fieldset>
+        <div className="rounded-2xl border border-black/10 bg-black/[.02] p-6 text-sm leading-relaxed text-black/70 dark:border-white/10 dark:bg-white/[.04] dark:text-white/70">
+          {survey.screening.message}
+        </div>
       </div>
     );
   }
@@ -156,8 +216,12 @@ export default function SurveyForm({ survey }: { survey: Survey }) {
         </p>
       </div>
 
+      {current.intro && (
+        <p className="-mt-3 text-sm leading-relaxed text-black/55 dark:text-white/55">{current.intro}</p>
+      )}
+
       <div className="space-y-8">
-        {current.questions.map((q, i) => (
+        {visible.map((q, i) => (
           <fieldset key={q.id} id={`q-${q.id}`} className="space-y-3">
             <legend className="text-base leading-snug font-medium text-pretty">
               <span className="mr-2 text-black/35 tabular-nums dark:text-white/35">{i + 1}.</span>
@@ -196,7 +260,7 @@ export default function SurveyForm({ survey }: { survey: Survey }) {
           {status === "sending" ? "Submitting…" : isLast ? "Submit" : "Continue"}
         </button>
         <span className="ml-auto text-xs text-black/40 dark:text-white/40">
-          {step === 0 ? <><span className="text-red-600">*</span> required</> : "All questions optional"}
+          {visible.some((q) => q.required) ? <><span className="text-red-600">*</span> required</> : "All questions optional"}
         </span>
       </div>
     </div>
@@ -225,6 +289,21 @@ function Field({
 
   if (q.type === "long")
     return <textarea rows={4} className={inputCls} placeholder={q.placeholder ?? "Type your answer here…"} value={(value as string) ?? ""} onChange={(e) => set(q.id, e.target.value)} />;
+
+  if (q.type === "single" && q.layout === "row")
+    return (
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+        {q.options.map((o) => (
+          <label
+            key={o}
+            className="flex cursor-pointer items-center justify-center rounded-lg border border-black/10 px-2 py-2.5 text-center text-xs leading-snug transition hover:bg-black/[.03] has-checked:border-black has-checked:bg-black has-checked:text-white dark:border-white/10 dark:hover:bg-white/[.04] dark:has-checked:border-white dark:has-checked:bg-white dark:has-checked:text-black"
+          >
+            <input type="radio" name={q.id} value={o} checked={value === o} onChange={() => set(q.id, o)} className="sr-only" />
+            <span>{o}</span>
+          </label>
+        ))}
+      </div>
+    );
 
   if (q.type === "single")
     return (

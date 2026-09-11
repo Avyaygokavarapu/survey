@@ -159,7 +159,13 @@ export default async function AdminSurveyPage({
                 {columns.map((c) => (
                   <th key={c.q.id} className="min-w-[12rem] max-w-[18rem] px-3 py-2.5 text-left align-bottom font-medium">
                     <span className="block text-[11px] leading-tight text-black/45 dark:text-white/45">
-                      {c.group === "role" ? "Routing" : c.group === "common" ? "Common" : `Branch ${c.group}`}
+                      {c.group === "role"
+                        ? "Routing"
+                        : c.group === "common"
+                          ? "Common"
+                          : survey.sections || c.group === "Screening"
+                            ? c.group
+                            : `Branch ${c.group}`}
                     </span>
                     <span className="block leading-snug">{c.header}</span>
                   </th>

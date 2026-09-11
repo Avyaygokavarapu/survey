@@ -8,13 +8,16 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { familyHealth } from "./family-health";
+import { traderPsychology } from "./trader-psychology";
 import type { Question, Survey } from "./types";
 
 /** Route segments that are already taken by the app itself. */
 const RESERVED = new Set(["admin", "api", "robots.txt", "sitemap.xml", "_next", "favicon.ico"]);
 
+/** Presentation order — a `showIf` may only look backwards along this list. */
 function everyQuestion(s: Survey): Question[] {
   return [
+    ...(s.screening ? [s.screening.question] : []),
     ...(s.routing ? [s.routing.question] : []),
     ...Object.values(s.routing?.branches ?? {}).flatMap((b) => b.questions),
     ...s.questions,
@@ -48,11 +51,40 @@ function register(...list: Survey[]): Record<string, Survey> {
       }
     }
 
+    const ordered = everyQuestion(s);
     const seen = new Set<string>();
-    for (const q of everyQuestion(s)) {
+    for (const q of ordered) {
       if (seen.has(q.id)) throw new Error(`[${s.slug}] Duplicate question id "${q.id}".`);
       seen.add(q.id);
     }
+
+    // `sections` is only a display grouping; it must cover `questions` exactly.
+    if (s.sections) {
+      const flat = s.sections.flatMap((sec) => sec.questions).map((q) => q.id).join(",");
+      if (flat !== s.questions.map((q) => q.id).join(",")) {
+        throw new Error(`[${s.slug}] sections do not match questions — derive questions from sections.`);
+      }
+    }
+
+    // A conditional question whose trigger is mistyped would hide itself for
+    // every respondent, silently and forever. Catch it at load instead.
+    const at = new Map(ordered.map((q, i) => [q.id, i]));
+    ordered.forEach((q, i) => {
+      for (const c of q.showIf ?? []) {
+        const j = at.get(c.question);
+        if (j === undefined) throw new Error(`[${s.slug}] "${q.id}" has showIf on unknown question "${c.question}".`);
+        if (j >= i) throw new Error(`[${s.slug}] "${q.id}" has showIf on "${c.question}", which is not asked before it.`);
+        const trigger = ordered[j];
+        if (trigger.type !== "single" && trigger.type !== "multi") {
+          throw new Error(`[${s.slug}] "${q.id}" has showIf on "${c.question}", which has no options.`);
+        }
+        for (const v of c.in) {
+          if (!trigger.options.includes(v)) {
+            throw new Error(`[${s.slug}] "${q.id}" has showIf value "${v}" that is not an option of "${c.question}".`);
+          }
+        }
+      }
+    });
 
     bySlug[s.slug] = s;
   }
@@ -60,7 +92,7 @@ function register(...list: Survey[]): Record<string, Survey> {
   return bySlug;
 }
 
-export const SURVEYS = register(familyHealth);
+export const SURVEYS = register(familyHealth, traderPsychology);
 
 export const SURVEY_LIST: Survey[] = Object.values(SURVEYS);
 
